@@ -198,6 +198,8 @@ pub struct Inner {
     #[doc(hidden)]
     pub create_new: bool,
     #[doc(hidden)]
+    pub snapshot_after_ops: u64,
+    #[doc(hidden)]
     pub mode: Mode,
     #[doc(hidden)]
     pub temporary: bool,
@@ -225,6 +227,7 @@ impl Default for Inner {
             path: PathBuf::from(DEFAULT_PATH),
             tmp_path: Config::gen_temp_path(),
             create_new: false,
+            snapshot_after_ops: 1_000_000,
             cache_capacity: 1024 * 1024 * 1024, // 1gb
             mode: Mode::LowSpace,
             use_compression: false,

@@ -20,7 +20,10 @@ mod reservation;
 mod segment;
 mod snapshot;
 
-use std::{collections::BinaryHeap, ops::Deref};
+use std::{collections::BinaryHeap,
+          ops::Deref,
+          sync::atomic::Ordering::Relaxed,
+};
 
 use crate::*;
 
@@ -506,6 +509,8 @@ pub struct PageCache {
     free: Arc<Mutex<BinaryHeap<PageId>>>,
     #[doc(hidden)]
     pub log: Log,
+    /// Keeps track of the number of operations so far.
+    ops_count: AtomicU64,
     lru: Lru,
     idgen: Arc<AtomicU64>,
     idgen_persists: Arc<AtomicU64>,
@@ -646,6 +651,7 @@ impl PageCache {
             next_pid_to_allocate: Mutex::new(0),
             free: Arc::new(Mutex::new(BinaryHeap::new())),
             log: Log::start(config, &snapshot)?,
+            ops_count: AtomicU64::new(0),
             lru,
             idgen_persist_mu: Arc::new(Mutex::new(())),
             idgen: Arc::new(AtomicU64::new(0)),
@@ -986,6 +992,7 @@ impl PageCache {
         new: Link,
         guard: &'g Guard,
     ) -> Result<CasResult<'g, Link>> {
+        let curr_ops_count = self.ops_count.fetch_add(1, Relaxed);
         let _measure = Measure::new(&M.link_page);
 
         trace!("linking pid {} with {:?}", pid, new);
@@ -1117,6 +1124,17 @@ impl PageCache {
                     }
 
                     old.read = new_shared;
+
+                    // One thing to notice is that `snapshot_after_ops` is an in-memory value.
+                    // Therefore, if the database crashes everytime between 0th and the
+                    // `snapshot_after_ops`, we will never take the fuzzy-snapshot. But if we
+                    // crash that often, we have bigger problems.
+                    if curr_ops_count % self.config.snapshot_after_ops == self.config
+                        .snapshot_after_ops - 1 {
+                        threadpool::spawn(|| {
+                            self.take_fuzzy_snapshot();
+                        });
+                    }
 
                     return Ok(Ok(old));
                 }
@@ -2138,7 +2156,7 @@ impl PageCache {
     /// Therefore, the `stable_lsn` gives us the state
     /// of the world, when the snapshot was taken.
     #[allow(unused)]
-    fn take_fuzzy_snapshot(self) -> Snapshot {
+    fn take_fuzzy_snapshot(&self) -> Snapshot {
         let stable_lsn_now: Lsn = self.log.stable_offset();
 
         // This is how we determine the number of the pages we will snapshot.
